@@ -24,7 +24,10 @@ class AttendanceApp:
         self.db = EmployeeDatabase()
         self.attendance_log = AttendanceLog()
         self.face_recognizer = FaceRecognizer(tolerance=0.5)
-        self.greeting_system = GreetingSystem()
+        # Sử dụng Google TTS cho giọng nữ Việt Nam tự nhiên
+        # use_gtts=True: giọng nữ Việt tự nhiên (cần internet)
+        # use_gtts=False: giọng robot offline
+        self.greeting_system = GreetingSystem(use_gtts=True)
         
         # Load known faces
         self.face_recognizer.load_known_faces(self.db.get_all_employees())
@@ -37,6 +40,11 @@ class AttendanceApp:
         # Tracking attendance
         self.last_recognized = {}  # {employee_id: timestamp}
         self.recognition_cooldown = 30  # seconds (tránh ghi log liên tục)
+        
+        # Frame skipping để giảm lag
+        self.frame_count = 0
+        self.process_every_n_frames = 3  # chỉ nhận diện mỗi 3 frame
+        self.last_face_results = []  # cache kết quả nhận diện gần nhất
         
         # Setup GUI
         self.setup_ui()
@@ -149,8 +157,15 @@ class AttendanceApp:
     def start_camera(self):
         """Bật camera"""
         if not self.camera_running:
-            self.camera = cv2.VideoCapture(0)
+            # Sử dụng DSHOW backend trên Windows để giảm latency
+            self.camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
             if self.camera.isOpened():
+                # Cấu hình camera cho hiệu suất tối ưu
+                self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                self.camera.set(cv2.CAP_PROP_FPS, 30)
+                self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # giảm buffer để giảm lag
+                
                 self.camera_running = True
                 self.start_camera_btn.config(state=tk.DISABLED)
                 self.stop_camera_btn.config(state=tk.NORMAL)
@@ -261,40 +276,195 @@ class AttendanceApp:
             self.attendance_listbox.insert(tk.END, display_text)
     
     def add_employee_dialog(self):
-        """Dialog thêm nhân viên mới"""
+        """Dialog thêm nhân viên mới với form đầy đủ"""
         if not self.camera_running:
             messagebox.showwarning("Cảnh báo", "Vui lòng bật camera trước!")
             return
         
-        # Nhập thông tin
-        employee_id = simpledialog.askstring("Thêm Nhân Viên", "Nhập ID nhân viên:")
-        if not employee_id:
-            return
+        # Tạo dialog window
+        dialog = tk.Toplevel(self.root)
+        dialog.title("➕ Thêm Nhân Viên Mới")
+        dialog.geometry("450x500")
+        dialog.resizable(False, False)
+        dialog.grab_set()  # Modal dialog
         
-        # Kiểm tra ID đã tồn tại
-        if self.db.get_employee(employee_id):
-            messagebox.showerror("Lỗi", "ID nhân viên đã tồn tại!")
-            return
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (450 // 2)
+        y = (dialog.winfo_screenheight() // 2) - (500 // 2)
+        dialog.geometry(f"450x500+{x}+{y}")
         
-        name = simpledialog.askstring("Thêm Nhân Viên", "Nhập tên nhân viên:")
-        if not name:
-            return
+        # Main frame
+        main_frame = ttk.Frame(dialog, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Chụp ảnh và tạo encoding
+        # Title
+        title_label = ttk.Label(
+            main_frame, 
+            text="📝 THÔNG TIN NHÂN VIÊN MỚI",
+            font=('Arial', 14, 'bold')
+        )
+        title_label.pack(pady=(0, 20))
+        
+        # Camera preview frame
+        preview_frame = ttk.LabelFrame(main_frame, text="📸 Hình ảnh từ camera", padding="10")
+        preview_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        preview_label = ttk.Label(preview_frame)
+        preview_label.pack()
+        
+        # Show current camera frame
         if self.current_frame is not None:
-            face_encoding = self.face_recognizer.create_face_encoding(self.current_frame)
+            frame_resized = cv2.resize(self.current_frame, (300, 225))
+            frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            imgtk = ImageTk.PhotoImage(image=img)
+            preview_label.imgtk = imgtk
+            preview_label.config(image=imgtk)
+        
+        # Form fields
+        form_frame = ttk.Frame(main_frame)
+        form_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        
+        # ID field
+        ttk.Label(form_frame, text="🆔 Mã nhân viên:", font=('Arial', 10)).grid(
+            row=0, column=0, sticky=tk.W, pady=8
+        )
+        id_entry = ttk.Entry(form_frame, width=30, font=('Arial', 10))
+        id_entry.grid(row=0, column=1, pady=8, padx=(10, 0))
+        id_entry.focus()
+        
+        # Name field
+        ttk.Label(form_frame, text="👤 Họ và tên:", font=('Arial', 10)).grid(
+            row=1, column=0, sticky=tk.W, pady=8
+        )
+        name_entry = ttk.Entry(form_frame, width=30, font=('Arial', 10))
+        name_entry.grid(row=1, column=1, pady=8, padx=(10, 0))
+        
+        # Birth date field
+        ttk.Label(form_frame, text="🎂 Ngày sinh:", font=('Arial', 10)).grid(
+            row=2, column=0, sticky=tk.W, pady=8
+        )
+        
+        # Birth date frame with 3 comboboxes
+        birth_frame = ttk.Frame(form_frame)
+        birth_frame.grid(row=2, column=1, pady=8, padx=(10, 0), sticky=tk.W)
+        
+        # Day
+        day_var = tk.StringVar()
+        day_combo = ttk.Combobox(
+            birth_frame, 
+            textvariable=day_var, 
+            width=5,
+            values=[f"{i:02d}" for i in range(1, 32)],
+            state='readonly'
+        )
+        day_combo.set("01")
+        day_combo.pack(side=tk.LEFT, padx=2)
+        
+        ttk.Label(birth_frame, text="/").pack(side=tk.LEFT)
+        
+        # Month
+        month_var = tk.StringVar()
+        month_combo = ttk.Combobox(
+            birth_frame,
+            textvariable=month_var,
+            width=5,
+            values=[f"{i:02d}" for i in range(1, 13)],
+            state='readonly'
+        )
+        month_combo.set("01")
+        month_combo.pack(side=tk.LEFT, padx=2)
+        
+        ttk.Label(birth_frame, text="/").pack(side=tk.LEFT)
+        
+        # Year
+        year_var = tk.StringVar()
+        current_year = datetime.now().year
+        year_combo = ttk.Combobox(
+            birth_frame,
+            textvariable=year_var,
+            width=8,
+            values=[str(y) for y in range(current_year - 70, current_year - 15)],
+            state='readonly'
+        )
+        year_combo.set(str(current_year - 25))
+        year_combo.pack(side=tk.LEFT, padx=2)
+        
+        # Error label
+        error_label = ttk.Label(form_frame, text="", foreground="red", font=('Arial', 9))
+        error_label.grid(row=3, column=0, columnspan=2, pady=5)
+        
+        # Buttons frame
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X)
+        
+        def save_employee():
+            """Lưu thông tin nhân viên"""
+            employee_id = id_entry.get().strip()
+            name = name_entry.get().strip()
+            birth_date = f"{day_var.get()}/{month_var.get()}/{year_var.get()}"
             
-            if face_encoding is not None:
-                # Lưu vào database
-                self.db.add_employee(employee_id, name, face_encoding)
+            # Validation
+            if not employee_id:
+                error_label.config(text="⚠️ Vui lòng nhập mã nhân viên!")
+                id_entry.focus()
+                return
+            
+            if not name:
+                error_label.config(text="⚠️ Vui lòng nhập họ tên!")
+                name_entry.focus()
+                return
+            
+            # Kiểm tra ID đã tồn tại
+            if self.db.get_employee(employee_id):
+                error_label.config(text="⚠️ Mã nhân viên đã tồn tại!")
+                id_entry.focus()
+                return
+            
+            # Chụp ảnh và tạo encoding
+            if self.current_frame is not None:
+                face_encoding = self.face_recognizer.create_face_encoding(self.current_frame)
                 
-                # Reload known faces
-                self.face_recognizer.load_known_faces(self.db.get_all_employees())
-                
-                messagebox.showinfo("Thành công", f"Đã thêm nhân viên {name}!")
-                self.status_var.set(f"Đã thêm nhân viên: {name}")
+                if face_encoding is not None:
+                    # Lưu vào database
+                    self.db.add_employee(employee_id, name, face_encoding, birth_date)
+                    
+                    # Reload known faces
+                    self.face_recognizer.load_known_faces(self.db.get_all_employees())
+                    
+                    dialog.destroy()
+                    messagebox.showinfo("Thành công", f"✅ Đã thêm nhân viên:\n\n👤 {name}\n🆔 {employee_id}\n🎂 {birth_date}")
+                    self.status_var.set(f"Đã thêm nhân viên: {name}")
+                else:
+                    error_label.config(text="⚠️ Không phát hiện khuôn mặt! Vui lòng đối diện camera.")
             else:
-                messagebox.showerror("Lỗi", "Không phát hiện khuôn mặt! Vui lòng thử lại.")
+                error_label.config(text="⚠️ Không có hình ảnh từ camera!")
+        
+        def cancel():
+            """Hủy bỏ"""
+            dialog.destroy()
+        
+        # Save button
+        save_btn = ttk.Button(
+            button_frame,
+            text="✅ Lưu thông tin",
+            command=save_employee,
+            style='Accent.TButton'
+        )
+        save_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 5))
+        
+        # Cancel button
+        cancel_btn = ttk.Button(
+            button_frame,
+            text="❌ Hủy bỏ",
+            command=cancel
+        )
+        cancel_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(5, 0))
+        
+        # Bind Enter key to save
+        dialog.bind('<Return>', lambda e: save_employee())
+        dialog.bind('<Escape>', lambda e: cancel())
     
     def view_employees(self):
         """Xem danh sách nhân viên"""
@@ -302,28 +472,63 @@ class AttendanceApp:
         
         # Tạo cửa sổ mới
         view_window = tk.Toplevel(self.root)
-        view_window.title("Danh Sách Nhân Viên")
-        view_window.geometry("500x400")
+        view_window.title("📋 Danh Sách Nhân Viên")
+        view_window.geometry("700x450")
+        
+        # Title
+        title_frame = ttk.Frame(view_window, padding="10")
+        title_frame.pack(fill=tk.X)
+        
+        ttk.Label(
+            title_frame,
+            text="👥 DANH SÁCH NHÂN VIÊN",
+            font=('Arial', 14, 'bold')
+        ).pack()
         
         # Treeview
         tree_frame = ttk.Frame(view_window, padding="10")
         tree_frame.pack(fill=tk.BOTH, expand=True)
         
-        tree = ttk.Treeview(tree_frame, columns=('ID', 'Tên', 'Ngày tạo'), show='headings')
-        tree.heading('ID', text='ID')
-        tree.heading('Tên', text='Tên')
-        tree.heading('Ngày tạo', text='Ngày tạo')
+        # Define columns with birth date
+        columns = ('ID', 'Tên', 'Ngày sinh', 'Ngày tạo')
+        tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=15)
+        
+        # Configure columns
+        tree.heading('ID', text='🆔 Mã NV')
+        tree.heading('Tên', text='👤 Họ và tên')
+        tree.heading('Ngày sinh', text='🎂 Ngày sinh')
+        tree.heading('Ngày tạo', text='📅 Ngày tạo')
+        
+        tree.column('ID', width=100, anchor=tk.CENTER)
+        tree.column('Tên', width=200, anchor=tk.W)
+        tree.column('Ngày sinh', width=120, anchor=tk.CENTER)
+        tree.column('Ngày tạo', width=150, anchor=tk.CENTER)
         
         # Scrollbar
         scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscroll=scrollbar.set)
+        tree.configure(yscrollcommand=scrollbar.set)
         
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Thêm dữ liệu
         for emp_id, emp_data in employees.items():
-            tree.insert('', tk.END, values=(emp_id, emp_data['name'], emp_data['created_at']))
+            birth_date = emp_data.get('birth_date', 'N/A')
+            created_at = emp_data.get('created_at', 'N/A')
+            tree.insert('', tk.END, values=(
+                emp_id, 
+                emp_data['name'], 
+                birth_date,
+                created_at
+            ))
+        
+        # Count label
+        count_label = ttk.Label(
+            view_window,
+            text=f"Tổng số: {len(employees)} nhân viên",
+            font=('Arial', 9)
+        )
+        count_label.pack(pady=5)
         
         # Button xóa
         def delete_selected():
@@ -331,14 +536,31 @@ class AttendanceApp:
             if selected:
                 item = tree.item(selected[0])
                 emp_id = item['values'][0]
+                emp_name = item['values'][1]
                 
-                if messagebox.askyesno("Xác nhận", f"Xóa nhân viên {item['values'][1]}?"):
+                if messagebox.askyesno("Xác nhận", f"🗑️ Xóa nhân viên?\n\n👤 {emp_name}\n🆔 {emp_id}"):
                     self.db.delete_employee(emp_id)
                     self.face_recognizer.load_known_faces(self.db.get_all_employees())
                     tree.delete(selected[0])
-                    messagebox.showinfo("Thành công", "Đã xóa nhân viên!")
+                    messagebox.showinfo("Thành công", f"✅ Đã xóa nhân viên {emp_name}!")
+                    # Update count
+                    count_label.config(text=f"Tổng số: {len(self.db.get_all_employees())} nhân viên")
         
-        ttk.Button(view_window, text="🗑 Xóa nhân viên đã chọn", command=delete_selected).pack(pady=10)
+        # Buttons frame
+        btn_frame = ttk.Frame(view_window, padding="10")
+        btn_frame.pack(fill=tk.X)
+        
+        ttk.Button(
+            btn_frame, 
+            text="🗑 Xóa nhân viên đã chọn", 
+            command=delete_selected
+        ).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(
+            btn_frame,
+            text="❌ Đóng",
+            command=view_window.destroy
+        ).pack(side=tk.RIGHT, padx=5)
     
     def export_attendance(self):
         """Xuất file CSV chấm công"""

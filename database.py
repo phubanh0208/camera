@@ -23,11 +23,12 @@ class EmployeeDatabase:
         with open(self.db_file, 'wb') as f:
             pickle.dump(self.employees, f)
     
-    def add_employee(self, employee_id, name, face_encoding):
+    def add_employee(self, employee_id, name, face_encoding, birth_date=None):
         """Thêm nhân viên mới vào database"""
         self.employees[employee_id] = {
             'name': name,
             'face_encoding': face_encoding,
+            'birth_date': birth_date,
             'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
         self.save_database()

@@ -1,31 +1,81 @@
 """
 Hệ thống chào hỏi nhân viên bằng text-to-speech
+Hỗ trợ giọng nữ Tiếng Việt
 """
 import pyttsx3
 import threading
 from datetime import datetime
+import os
+import tempfile
+
+# Import gTTS cho giọng Việt tốt hơn (optional)
+try:
+    from gtts import gTTS
+    import pygame
+    GTTS_AVAILABLE = True
+except ImportError:
+    GTTS_AVAILABLE = False
 
 class GreetingSystem:
-    def __init__(self):
-        self.engine = pyttsx3.init()
-        self.setup_voice()
+    def __init__(self, use_gtts=True):
+        """
+        use_gtts: True = dùng Google TTS (giọng Việt tự nhiên, cần internet)
+                  False = dùng pyttsx3 (offline, giọng robot hơn)
+        """
+        self.use_gtts = use_gtts and GTTS_AVAILABLE
         self.greeted_today = set()  # Tránh chào lặp lại trong cùng 1 ngày
+        
+        if not self.use_gtts:
+            self.engine = pyttsx3.init()
+            self.setup_voice()
+        else:
+            # Khởi tạo pygame mixer cho phát âm thanh
+            try:
+                pygame.mixer.init()
+            except:
+                # Fallback về pyttsx3 nếu pygame không hoạt động
+                self.use_gtts = False
+                self.engine = pyttsx3.init()
+                self.setup_voice()
     
     def setup_voice(self):
-        """Cấu hình giọng nói"""
+        """Cấu hình giọng nói cho pyttsx3 (offline)"""
         # Tốc độ nói (words per minute)
         self.engine.setProperty('rate', 150)
         
         # Âm lượng (0.0 to 1.0)
         self.engine.setProperty('volume', 0.9)
         
-        # Chọn giọng (nếu có giọng tiếng Việt)
+        # Tìm giọng nữ
         voices = self.engine.getProperty('voices')
-        # Thử tìm giọng tiếng Việt, nếu không có thì dùng giọng mặc định
+        
+        # In ra danh sách giọng để debug
+        print("=== Danh sách giọng có sẵn ===")
+        for idx, voice in enumerate(voices):
+            print(f"{idx}: {voice.name} - {voice.id}")
+            print(f"   Languages: {voice.languages}")
+            print(f"   Gender: {getattr(voice, 'gender', 'unknown')}")
+        
+        # Thử tìm giọng nữ Tiếng Việt hoặc giọng nữ
+        female_voice = None
         for voice in voices:
-            if 'vietnam' in voice.name.lower() or 'vi' in voice.languages:
-                self.engine.setProperty('voice', voice.id)
+            voice_name_lower = voice.name.lower()
+            
+            # Ưu tiên giọng Việt Nam nữ
+            if 'vietnam' in voice_name_lower and 'female' in voice_name_lower:
+                female_voice = voice.id
+                print(f"\n✅ Đã chọn giọng: {voice.name}")
                 break
+            
+            # Thử tìm giọng nữ tiếng Anh (Zira, Hazel, Susan, etc.)
+            if any(name in voice_name_lower for name in ['zira', 'hazel', 'susan', 'female']):
+                female_voice = voice.id
+        
+        if female_voice:
+            self.engine.setProperty('voice', female_voice)
+            print(f"✅ Đã đặt giọng nữ")
+        else:
+            print("⚠️ Không tìm thấy giọng nữ, dùng giọng mặc định")
     
     def greet_employee(self, name, employee_id):
         """
@@ -60,10 +110,49 @@ class GreetingSystem:
     def _speak(self, message):
         """Phát âm thanh (chạy trong thread riêng)"""
         try:
-            self.engine.say(message)
-            self.engine.runAndWait()
+            if self.use_gtts:
+                # Dùng Google TTS - giọng nữ Việt Nam tự nhiên
+                self._speak_gtts(message)
+            else:
+                # Dùng pyttsx3 - offline
+                self.engine.say(message)
+                self.engine.runAndWait()
         except Exception as e:
             print(f"Lỗi TTS: {e}")
+    
+    def _speak_gtts(self, message):
+        """Phát âm bằng Google TTS (giọng nữ Việt Nam)"""
+        try:
+            # Tạo file âm thanh tạm
+            tts = gTTS(text=message, lang='vi', slow=False)
+            
+            # Lưu vào file tạm
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+            temp_filename = temp_file.name
+            temp_file.close()
+            
+            tts.save(temp_filename)
+            
+            # Phát âm thanh
+            pygame.mixer.music.load(temp_filename)
+            pygame.mixer.music.play()
+            
+            # Đợi phát xong
+            while pygame.mixer.music.get_busy():
+                pygame.time.Clock().tick(10)
+            
+            # Xóa file tạm
+            try:
+                os.unlink(temp_filename)
+            except:
+                pass
+                
+        except Exception as e:
+            print(f"Lỗi Google TTS: {e}")
+            # Fallback về pyttsx3
+            if hasattr(self, 'engine'):
+                self.engine.say(message)
+                self.engine.runAndWait()
     
     def greet_unknown(self):
         """Chào người lạ"""

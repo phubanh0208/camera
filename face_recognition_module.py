@@ -40,26 +40,18 @@ class FaceRecognizer:
         results = []
         
         for face_encoding, face_location in zip(face_encodings, face_locations):
-            # So sánh với các khuôn mặt đã biết
-            matches = face_recognition.compare_faces(
-                self.known_face_encodings, 
-                face_encoding, 
-                tolerance=self.tolerance
-            )
-            
             employee_id = None
-            name = "Unknown"
             
-            if True in matches:
-                # Tìm khuôn mặt khớp nhất
-                face_distances = face_recognition.face_distance(
-                    self.known_face_encodings, 
-                    face_encoding
-                )
-                best_match_index = np.argmin(face_distances)
+            # Vectorized matching nhanh hơn compare_faces
+            if len(self.known_face_encodings) > 0:
+                enc = face_encoding.astype(np.float32)
+                # Tính khoảng cách Euclidean với tất cả encodings đã biết
+                dists = np.linalg.norm(self.known_face_encodings - enc, axis=1)
+                best_idx = int(np.argmin(dists))
                 
-                if matches[best_match_index]:
-                    employee_id = self.known_face_ids[best_match_index]
+                # So sánh với tolerance (face_recognition dùng 0.6 mặc định)
+                if dists[best_idx] <= self.tolerance:
+                    employee_id = self.known_face_ids[best_idx]
             
             # Scale lại vị trí về kích thước ban đầu
             top, right, bottom, left = face_location
